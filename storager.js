@@ -6,6 +6,8 @@
  * storage. A key feature of Storager is the ability to listen on any key.
  *
  * TODO: Add TTL?
+ * TODO: Add functionality to data structures to provide methods to Storager. Useful for listeners which right now
+ *       only get copies of the data. Would be able to pop off of array and have that reflect in storage.
  */
 
 var _setItem = Storage.prototype.setItem;
@@ -26,12 +28,14 @@ Storage.prototype.getItem = function (key) {
         _getItem.apply(this, arguments);
 };
 
-var data = {
+var storager = {
     _initialized: false,
-    _app_name: "app",
+    _app_name: "storager_app",
+    _vars: {},
+    _defaults: {},
     init: function (vars) {
         /**
-         * vars should be an obj containing the elements global or local.
+         * vars should be an obj containing the elements app_name, global and local.
          *
          * global variables will be initialized in localStorage and will be accessible from different windows.
          * local variables will be initialized in a local data structure and will not be accessible from different windows.
@@ -52,49 +56,97 @@ var data = {
          *     ]
          * }
          */
+        // If you have already called init, return.
         if (this._initialized) return;
         this._initialized = true;
-        window.addEventListener("storage", this._handle_storage, false);
-        if ("server" in window.localStorage) return;
-        vars.forEach(function (val) {
-            data.set(val.name, val.value);
-        });
+        this._defaults = vars;
+        this._app_name = vars.app_name;
+
+        // Add a listener to storage and add the handler.
+        window.addEventListener("storage", this._handle_storage);
+
+        // Initialize local variables.
+        if (vars.local)
+            vars.local.forEach(function (val) {
+                storager._vars[val.name] = val.value;
+            });
+
+        // If global variables have already been initialized, return.
+        console.log("checking if vars are there already:",window.localStorage);
+        if (vars.global[0].name in window.localStorage) return;
+
+//        // Set global initialized flag so that other tabs don't initialize global variables.
+//        this.set("storager.initialized", true);
+
+        // Initialize global variables.
+        if (vars.global)
+            vars.global.forEach(function (val) {
+                console.log("setting: " + val.name + " to: " + val.value);
+                storager.set(val.name, val.value);
+            });
     },
-    reset: function (wipe) {
-        if (wipe)
+    reset: function (global, local, wipe) {
+        if (wipe) {
             window.localStorage.clear();
-        this.set("server", null);
-        this.set("channels", null);
-        this.set("clients", {});
-        this.set("current_window", null);
+            this._vars = {};
+        }
+
+        if (global) {
+            // Initialize global variables.
+            if (this._defaults.global)
+                this._defaults.global.forEach(function (val) {
+                    storager.set(val.name, val.value);
+                });
+        }
+
+        if (local) {
+            // Initialize local variables.
+            if (this._defaults.local)
+                this._defaults.local.forEach(function (val) {
+                    storager._vars[val.name] = val.value;
+                });
+        }
     },
     _check_if_init: function () {
-        if (!this._initialized) throw "Data structure not initialized. Call data.init() first. data.init() should only be called once!";
+        if (!this._initialized) throw "Data structure not initialized. Call storager.init() first. storager.init() should only be called once!";
         return true;
     },
     _handle_storage: function (e) {
         var type = e.key;
-        var event = new CustomEvent("speakeasy." + type, {
+        var event = new CustomEvent(storager._app_name + "." + type, {
             "detail": {
-                "from": e.oldValue,
-                "to": e.newValue,
+                "from": JSON.parse(e.oldValue),
+                "to": JSON.parse(e.newValue),
+                "data": JSON.parse(e.newValue), //alias
                 "page": e.url
             },
             "cancelable": true
         });
         window.dispatchEvent(event);
     },
-    get: function (key) {
+    get: function (key, local) {
         // Should add caching to this so I am not parsing over and over.
         // Probably have internal data structure and use _handle_storage to update it.
         // Then have this function just return the internal data structure data
-        console.log("data module still needs caching...");
+        console.log("storager module still needs caching...");
         this._check_if_init();
-        return window.localStorage.getItem(key);
+        if (local)
+            return this._vars[key];
+        else
+            return window.localStorage.getItem(key);
     },
-    set: function (key, value) {
+    set: function (key, value, local) {
         this._check_if_init();
-        window.localStorage.setItem(key, value)
+        if (local)
+            this._vars[key] = value;
+        else
+            window.localStorage.setItem(key, value)
+    },
+    getLocal: function (key) {
+        return this.get(key, true);
+    },
+    setLocal: function (key, value) {
+        this.set(key, value, true);
     },
     delete: function (key) {
         // Could add TTL to this method
@@ -102,7 +154,9 @@ var data = {
     },
     push: function (key, value) {
         this._check_if_init();
-        this.set(key, this.get(key).push(value));
+        var data = this.get(key);
+        data.push(value);
+        this.set(key, data);
     },
     pop: function (key) {
         var data = this.get(key);
@@ -110,28 +164,34 @@ var data = {
         this.set(key, data);
         return ret_val;
     },
-    dequeue: function (key) {
-        var data = this.get(key);
+    dequeue: function (queue_name, method) {
+        var queue = this.get(queue_name + "_queue");
+        var data = queue[method];
         var ret_val = data.shift();
-        this.set(key, data);
+        queue[method] = data;
+        this.set(queue_name + "_queue", queue);
         return ret_val;
     },
-    addToObj: function (obj_key, key, value) {
+    addToObj: function (storage_key, key, value) {
         this._check_if_init();
-        var obj = this.get(obj_key);
+        var obj = this.get(storage_key);
         obj[key] = value;
         this.set(key, obj);
     },
     listenTo: function (key, callback) {
-        window.addEventListener("speakeasy." + key, callback);
+        // Events will be dispatched on every set. Use this function to listen to those events.
+        window.addEventListener(this._app_name + "." + key, callback);
     },
-    addToQueue: function (window, method, data) {
+    listenToQueue: function (queue_name, callback) {
+        this.listenTo(queue_name + "_queue", callback);
+    },
+    addToQueue: function (queue_name, method, data) {
         this._check_if_init();
-        var queue = this.get(window + "_queue") || {};
-//        if (!(window in queue)) queue[window] = {};
+        var queue = this.get(queue_name + "_queue") || {};
+//        if (!(queue_name in queue)) queue[queue_name] = {};
         if (!(method in queue)) queue[method] = [];
         queue[method].push(data);
-        this.set(window + "_queue", queue);
+        this.set(queue_name + "_queue", queue);
     },
     getQueue: function (window, method) {
         this._check_if_init();
